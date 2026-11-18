@@ -947,6 +947,16 @@ def _visible_windows() -> list[dict]:
     out: list[dict] = []
     if not IS_WINDOWS:
         return out
+
+    # Ensure this thread is attached to the active interactive desktop
+    try:
+        import win32service, win32con
+        hdesk = win32service.OpenInputDesktop(0, False, win32con.DESKTOP_ENUMERATE | win32con.GENERIC_ALL)
+        if hdesk:
+            _user32.SetThreadDesktop(int(hdesk))
+    except Exception:
+        pass
+
     proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
 
     def cb(hwnd, _lparam):
@@ -954,10 +964,9 @@ def _visible_windows() -> list[dict]:
             if not _user32.IsWindowVisible(hwnd):
                 return True
             n = _user32.GetWindowTextLengthW(hwnd)
-            if not n:
-                return True
             buf = ctypes.create_unicode_buffer(n + 1)
-            _user32.GetWindowTextW(hwnd, buf, n + 1)
+            if n:
+                _user32.GetWindowTextW(hwnd, buf, n + 1)
             cls = ctypes.create_unicode_buffer(256)
             _user32.GetClassNameW(hwnd, cls, 256)
             rect = wintypes.RECT()
@@ -975,6 +984,25 @@ def _visible_windows() -> list[dict]:
         _user32.EnumWindows(proc(cb), 0)
     except Exception:
         pass
+
+    # If EnumWindows returned empty, fallback to OpenInputDesktop window enumeration
+    if not out:
+        try:
+            import win32service, win32con, win32gui, win32process
+            hdesk = win32service.OpenInputDesktop(0, False, win32con.DESKTOP_ENUMERATE)
+            if hdesk:
+                for hwnd_h in hdesk.EnumDesktopWindows():
+                    hwnd = int(hwnd_h)
+                    if not win32gui.IsWindowVisible(hwnd):
+                        continue
+                    title = win32gui.GetWindowText(hwnd)
+                    cls_name = win32gui.GetClassName(hwnd)
+                    rect = win32gui.GetWindowRect(hwnd)
+                    _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                    out.append({"hwnd": hwnd, "title": title, "class": cls_name, "pid": pid, "rect": rect})
+        except Exception:
+            pass
+
     return out
 
 
@@ -3534,7 +3562,11 @@ class WindowsDesktop(Transport):
         for win in _whatsapp_family(self._pids):
             scan = win["hwnd"]
             if scan in main:
-                continue
+                # If this window is large (the main conversation view, >= 750x550), skip it.
+                # But if it's compact or small, it could be a call popup that got captured into main.
+                r = win.get("rect")
+                if r and (r[2] - r[0] >= 750 and r[3] - r[1] >= 550):
+                    continue
             # There is deliberately NO size test here any more.
             #
             # There was one — "a window bigger than the app is the app" — added

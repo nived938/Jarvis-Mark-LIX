@@ -72,13 +72,15 @@ PLUGIN = {
     "description": (
         "Places a WHATSAPP CALL to one of the user's contacts, and ends a call "
         "in progress. Use whenever the user wants to CALL, ring, phone or video "
-        "call somebody — e.g. 'call Yusuf on WhatsApp', 'ring mum', 'video call "
-        "my brother', 'start a video call with Ahmet', 'hang up', 'end the "
-        "call'. Put the contact's name exactly as it is saved in their phone "
-        "into 'contact'. If the user does not say which kind of call they want, "
+        "call somebody, OR when they want to call someone and tell/say something or "
+        "pass a message — e.g. 'call Yusuf on WhatsApp', 'call Malu and tell her I am busy', "
+        "'call Mom and say I will be late', 'ring mum', 'video call my brother', "
+        "'hang up', 'end the call'. Put the contact's name exactly as it is saved "
+        "in their phone into 'contact'. If the user says what to tell the contact, "
+        "put it into 'message'. If the user does not say which kind of call they want, "
         "leave 'call_type' as 'voice' — a plain voice call is the default. "
-        "Do NOT use 'send_message' for this: that only types a text message and "
-        "never rings anyone. "
+        "Do NOT use 'whatsapp_guard' for making calls — that tool is strictly for "
+        "incoming calls. "
         "User might say 'my mom', 'my dude', do not directly attain contact:'my dude' because 'my' doesn't mean a name. 'Call my dude' = contact: 'dude' "
         "CONFIRMATION RULE: if the tool answers that it opened a different "
         "conversation than the one asked for, do NOT retry silently — relay its "
@@ -107,6 +109,13 @@ PLUGIN = {
                     "Defaults to 'voice' when the user did not specify."
                 ),
                 "enum": ["voice", "video"],
+            },
+            "message": {
+                "type": "STRING",
+                "description": (
+                    "Optional message or sentence the user wants told to the person they are calling "
+                    "(e.g. 'I am busy', 'I will call back in 10 minutes')."
+                ),
             },
             "action": {
                 "type": "STRING",
@@ -267,25 +276,9 @@ def _run_unconfirmed(parameters: dict, player=None, session_memory=None) -> str:
 
     spoken = "video call" if call_type == "video" else "voice call"
 
+    message = str(params.get("message") or "").strip()
+
     # Hand the work to a thread and answer straight away.
-    #
-    # This is about WHEN the user hears something, and it was measured rather
-    # than guessed. Doing the dialling inside run() means the reply cannot be
-    # spoken until it finishes: on a real session the function call left at
-    # 0.6 s, the tool answered at 2.6 s, and the first word only arrived at
-    # 4.3 s — a second and a half AFTER the phone had started ringing. The
-    # assistant was narrating something the user was already listening to.
-    #
-    # Neither of the obvious cures works here. Asking the model in the prompt to
-    # speak before it calls does not change the order it chooses. NON_BLOCKING,
-    # which is the API's own answer, made the model fall silent after issuing
-    # the call and produce nothing at all. Injecting a sentence while the call
-    # was pending cancelled the exchange outright.
-    #
-    # So the tool returns in milliseconds and the phone is dialled behind it —
-    # the same shape screen_agent and water_reminder already use, with
-    # request_say carrying anything that still needs saying. The user now hears
-    # the sentence BEFORE the ringing starts, which is the whole point.
     with _lock:
         if _busy["running"]:
             return "I'm already placing a call — one moment."
@@ -293,15 +286,10 @@ def _run_unconfirmed(parameters: dict, player=None, session_memory=None) -> str:
 
     threading.Thread(
         target=_place_call,
-        args=(player, contact, call_type, spoken, confirmed, conf),
+        args=(player, contact, call_type, spoken, confirmed, conf, message),
         daemon=True, name="whatsapp-call",
     ).start()
-    # Deliberately a status line, not a sentence. Handing the model a finished
-    # first-person sentence in English is an invitation to repeat it, and it
-    # took one to prove it: a request made in Turkish came back in English,
-    # padded with an offer nobody had made. Facts only — the model writes the
-    # sentence, in the user's language.
-    return f"status=dialling contact={contact} type={call_type}"
+    return f"status=dialling contact={contact} type={call_type}" + (f" message=\"{message}\"" if message else "")
 
 
 def _hangup(player, conf: dict) -> str:
@@ -320,7 +308,7 @@ def _hangup(player, conf: dict) -> str:
 
 
 def _place_call(player, contact: str, call_type: str, spoken: str,
-                confirmed: bool, conf: dict) -> None:
+                confirmed: bool, conf: dict, message: str = "") -> None:
     """The part that takes seconds. Speaks only when something needs saying:
     silence here means it went through, and the panel already shows it."""
     try:
@@ -336,6 +324,10 @@ def _place_call(player, contact: str, call_type: str, spoken: str,
         _say(player, "Tell the user, in one short sentence in their own "
                      f"language: {outcome}")
         _log(player, f"{get_assistant_name()}: {outcome}")
+    elif message:
+        _say(player, "Tell the user, in one short sentence in their own "
+                     f"language: Calling {contact} on WhatsApp to say: {message}")
+        _log(player, f"{get_assistant_name()}: Calling {contact} on WhatsApp to convey message: {message}")
 
 
 def _do_call(player, contact: str, call_type: str, spoken: str,
